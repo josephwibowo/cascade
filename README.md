@@ -14,6 +14,7 @@ cp .env.example .env
 astro dev start
 pnpm --dir ui install
 pnpm --dir ui build
+printf 'airflow dags unpause product_change_assessment exception_resolution migration_verification\n' | astro dev bash -s
 ```
 
 The Airflow UI is available at `http://localhost:8080/`; the mock vendor
@@ -28,7 +29,8 @@ printf 'python scripts/reset_demo.py\n' | astro dev bash -s
 printf 'python scripts/prepare_hero_run.py\n' | astro dev bash -s
 ```
 
-The demo UI can then advance the mock world to day 7. The verification DAG
+The demo UI can then advance the mock world to day 7 and run verification from
+the scenario controls. The verification DAG
 discovers and maps only the changed accounts. Fixture generation is seeded and
 self-validating:
 
@@ -37,8 +39,9 @@ python scripts/generate_fixtures.py
 ```
 
 Set `AIRFLOW_CONN_CASCADE_LLM` to a supported pydantic-ai connection for model
-generated briefs. If it is absent or unavailable, briefs are persisted with
-`brief_source=deterministic` and migration status remains rule-derived.
+generated briefs. When running without a model, remove `AIRFLOW_CONN_CASCADE_LLM`
+from `.env` rather than leaving a `REPLACE` placeholder; briefs are then persisted
+with `brief_source=deterministic` and migration status remains rule-derived.
 
 ## Project layout
 

@@ -15,6 +15,16 @@ class AdvanceRequest(BaseModel):
     snapshot: str
 
 
+@router.get("")
+def scenario():
+    try:
+        return MockSystemsClient().scenario()
+    except AirflowAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.post("/advance")
 def advance(request: AdvanceRequest):
     try:

@@ -55,6 +55,7 @@ class AccountMigration(Base):
     __table_args__ = (
         Index("ix_account_migration_campaign_status", "campaign_id", "status"),
         Index("ix_account_migration_campaign_segment", "campaign_id", "segment"),
+        Index("ix_account_migration_campaign_risk", "campaign_id", "risk"),
         Index("ix_account_migration_campaign_arr", "campaign_id", "arr"),
     )
 

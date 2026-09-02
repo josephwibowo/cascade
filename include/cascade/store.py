@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import create_engine, delete, func, select, text, update
+from sqlalchemy import and_, case, create_engine, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
@@ -90,6 +90,10 @@ def _upsert_statement(session: Session, model: type, values: Mapping[str, Any], 
 
 def upsert_account_migration(session: Session, values: Mapping[str, Any]) -> AccountMigration:
     payload = dict(values)
+    if "daily_v1" in payload and "legacy_usage" not in payload:
+        payload["legacy_usage"] = sum(payload.get("daily_v1") or [])
+    if "daily_v2" in payload and "replacement_usage" not in payload:
+        payload["replacement_usage"] = sum(payload.get("daily_v2") or [])
     payload.setdefault("zero_v1_streak_days", zero_v1_streak(payload.get("daily_v1", [])))
     statement = _upsert_statement(session, AccountMigration, payload, ["campaign_id", "account_id"])
     if statement is not None:
@@ -241,43 +245,126 @@ def _account_dict(account: AccountMigration) -> dict[str, Any]:
     }
 
 
+def _account_row_dict(account: AccountMigration) -> dict[str, Any]:
+    """Return the fields needed to render one row in the account table."""
+
+    return {
+        "campaign_id": account.campaign_id,
+        "account_id": account.account_id,
+        "account_name": account.account_name,
+        "arr": account.arr,
+        "tier": account.tier,
+        "owner": account.owner,
+        "region": account.region,
+        "status": account.status,
+        "segment": account.segment,
+        "risk": account.risk,
+        "blocker_type": account.blocker_type,
+        "legacy_usage": account.legacy_usage,
+        "replacement_usage": account.replacement_usage,
+    }
+
+
+CHIP_IDS: tuple[str, ...] = (
+    "straightforward",
+    "actively_migrating",
+    "no_progress",
+    "strategic",
+    "contractual",
+    "technical_blocker",
+)
+
+
+def _chip_predicates() -> dict[str, Any]:
+    """SQL equivalents of the blast-radius chip predicates."""
+
+    return {
+        "straightforward": and_(
+            AccountMigration.segment == "STANDARD",
+            AccountMigration.status == "NOT_STARTED",
+            AccountMigration.replacement_usage > 0,
+        ),
+        "actively_migrating": AccountMigration.status == "IN_PROGRESS",
+        "no_progress": and_(
+            AccountMigration.status == "NOT_STARTED",
+            AccountMigration.legacy_usage > 0,
+            AccountMigration.replacement_usage == 0,
+        ),
+        "strategic": AccountMigration.segment == "STRATEGIC",
+        "contractual": AccountMigration.segment == "CONTRACTUAL",
+        "technical_blocker": AccountMigration.segment == "TECHNICAL_BLOCKER",
+    }
+
+
+def _filter_clauses(campaign_id: str, filters: Mapping[str, Any] | None = None) -> list[Any]:
+    filters = filters or {}
+    clauses: list[Any] = [AccountMigration.campaign_id == campaign_id]
+    if filters.get("status"):
+        clauses.append(AccountMigration.status == str(filters["status"]).upper())
+    if filters.get("segment"):
+        clauses.append(AccountMigration.segment == str(filters["segment"]).upper())
+    if filters.get("risk"):
+        clauses.append(AccountMigration.risk == str(filters["risk"]).upper())
+    if filters.get("q"):
+        term = f"%{filters['q']}%"
+        clauses.append(or_(AccountMigration.account_name.ilike(term), AccountMigration.account_id.ilike(term)))
+    chip = filters.get("chip")
+    predicate = _chip_predicates().get(chip) if chip else None
+    if predicate is not None:
+        clauses.append(predicate)
+    return clauses
+
+
+def _chip_counts(session: Session, clauses: list[Any]) -> dict[str, int]:
+    predicates = _chip_predicates()
+    values = [
+        func.coalesce(func.sum(case((predicates[chip], 1), else_=0)), 0).label(chip)
+        for chip in CHIP_IDS
+    ]
+    row = session.execute(select(*values).where(*clauses)).one()
+    return {chip: int(getattr(row, chip) or 0) for chip in CHIP_IDS}
+
+
 def get_campaign_rollup(session: Session, campaign_id: str) -> dict[str, Any] | None:
     campaign = session.get(Campaign, campaign_id)
     if campaign is None:
         return None
-    rows = list(session.scalars(select(AccountMigration).where(AccountMigration.campaign_id == campaign_id)))
-    status_distribution: dict[str, int] = {}
-    risk_distribution: dict[str, int] = {}
-    segment_distribution: dict[str, int] = {}
-    for row in rows:
-        status_distribution[row.status] = status_distribution.get(row.status, 0) + 1
-        risk_distribution[row.risk] = risk_distribution.get(row.risk, 0) + 1
-        segment_distribution[row.segment] = segment_distribution.get(row.segment, 0) + 1
+    campaign_clause = AccountMigration.campaign_id == campaign_id
+    counts = session.execute(
+        select(
+            func.count(AccountMigration.account_id),
+            func.coalesce(func.sum(AccountMigration.arr), 0.0),
+        ).where(campaign_clause)
+    ).one()
+    affected_accounts = int(counts[0] or 0)
+    affected_arr = counts[1] or 0.0
+
+    def distribution(column: Any) -> dict[str, int]:
+        return {
+            value: int(count)
+            for value, count in session.execute(
+                select(column, func.count()).where(campaign_clause).group_by(column)
+            ).all()
+        }
+
+    status_distribution = distribution(AccountMigration.status)
+    risk_distribution = distribution(AccountMigration.risk)
+    segment_distribution = distribution(AccountMigration.segment)
     pending_exceptions = session.scalar(select(func.count()).select_from(ExceptionRecord).where(ExceptionRecord.campaign_id == campaign_id, ExceptionRecord.status == "PENDING")) or 0
-    chip_counts = {
-        "straightforward": sum(
-            row.segment == "STANDARD" and row.status == "NOT_STARTED" and sum(row.daily_v2 or []) > 0
-            for row in rows
-        ),
-        "actively_migrating": sum(row.status == "IN_PROGRESS" for row in rows),
-        "no_progress": sum(
-            row.status == "NOT_STARTED" and sum(row.daily_v1 or []) > 0 and sum(row.daily_v2 or []) == 0
-            for row in rows
-        ),
-        "strategic": sum(row.segment == "STRATEGIC" for row in rows),
-        "contractual": sum(row.segment == "CONTRACTUAL" for row in rows),
-        "technical_blocker": sum(row.segment == "TECHNICAL_BLOCKER" for row in rows),
-    }
+    chip_counts = _chip_counts(session, [campaign_clause])
+    total = affected_accounts
+    migrated = status_distribution.get("MIGRATED", 0)
     return {
         "id": campaign.id,
         "name": campaign.name,
         "change_type": campaign.change_type,
         "deadline": campaign.deadline.isoformat() if campaign.deadline else None,
         "airflow_dag_run_id": campaign.airflow_dag_run_id,
+        "verification_run_id": campaign.verification_run_id,
         "status": campaign.status,
-        "affected_accounts": len(rows) if rows else campaign.affected_accounts,
-        "affected_arr": sum(row.arr for row in rows) if rows else campaign.affected_arr,
-        "migration_completion": (sum(row.status == "MIGRATED" for row in rows) / len(rows) if rows else 0),
+        "affected_accounts": affected_accounts if affected_accounts else campaign.affected_accounts,
+        "affected_arr": affected_arr if affected_accounts else campaign.affected_arr,
+        "migration_completion": migrated / total if total else 0,
         "status_distribution": status_distribution,
         "risk_distribution": risk_distribution,
         "segment_distribution": segment_distribution,
@@ -288,33 +375,38 @@ def get_campaign_rollup(session: Session, campaign_id: str) -> dict[str, Any] | 
     }
 
 
-def query_accounts(session: Session, campaign_id: str, filters: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
-    filters = filters or {}
-    query = select(AccountMigration).where(AccountMigration.campaign_id == campaign_id)
-    if filters.get("status"):
-        query = query.where(AccountMigration.status == str(filters["status"]).upper())
-    if filters.get("segment"):
-        query = query.where(AccountMigration.segment == str(filters["segment"]).upper())
-    if filters.get("risk"):
-        query = query.where(AccountMigration.risk == str(filters["risk"]).upper())
-    if filters.get("q"):
-        term = f"%{filters['q']}%"
-        query = query.where(AccountMigration.account_name.ilike(term) | AccountMigration.account_id.ilike(term))
-    chip = filters.get("chip")
-    rows = list(session.scalars(query.order_by(AccountMigration.arr.desc(), AccountMigration.account_name)))
-    if chip:
-        if chip == "straightforward":
-            # The contract's numeric chip is the standard/not-started population
-            # after excluding the separate no-progress slice (v2 is still zero).
-            rows = [row for row in rows if row.segment == "STANDARD" and row.status == "NOT_STARTED" and sum(row.daily_v2 or []) > 0]
-        elif chip == "actively_migrating":
-            rows = [row for row in rows if row.status == "IN_PROGRESS"]
-        elif chip == "no_progress":
-            rows = [row for row in rows if row.status == "NOT_STARTED" and sum(row.daily_v1 or []) > 0 and sum(row.daily_v2 or []) == 0]
-        elif chip in {"strategic", "contractual", "technical_blocker"}:
-            segment = {"strategic": "STRATEGIC", "contractual": "CONTRACTUAL", "technical_blocker": "TECHNICAL_BLOCKER"}[chip]
-            rows = [row for row in rows if row.segment == segment]
-    return [_account_dict(row) for row in rows]
+def query_accounts(
+    session: Session,
+    campaign_id: str,
+    filters: Mapping[str, Any] | None = None,
+    *,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    limit = max(1, min(500, int(limit)))
+    offset = max(0, int(offset))
+    clauses = _filter_clauses(campaign_id, filters)
+    base = select(AccountMigration).where(*clauses)
+    total = int(session.scalar(select(func.count()).select_from(base.subquery())) or 0)
+    rows = session.scalars(
+        base.order_by(AccountMigration.arr.desc(), AccountMigration.account_name)
+        .limit(limit)
+        .offset(offset)
+    )
+    return {
+        "items": [_account_row_dict(row) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+def chip_facets(session: Session, campaign_id: str, filters: Mapping[str, Any] | None = None) -> dict[str, int]:
+    """Count each chip while applying all non-chip filters."""
+
+    filters = dict(filters or {})
+    filters.pop("chip", None)
+    return _chip_counts(session, _filter_clauses(campaign_id, filters))
 
 
 def get_account(session: Session, account_id: str, campaign_id: str | None = None) -> dict[str, Any] | None:
@@ -344,16 +436,46 @@ def get_timeline(session: Session, campaign_id: str, account_id: str | None = No
 
 
 def get_pending_exceptions(session: Session, campaign_id: str | None = None) -> list[dict[str, Any]]:
-    query = select(ExceptionRecord).where(ExceptionRecord.status == "PENDING")
+    query = (
+        select(
+            ExceptionRecord,
+            AccountMigration.account_name,
+            AccountMigration.arr,
+            AccountMigration.status,
+            AccountMigration.risk,
+            AccountMigration.blocker_type,
+        )
+        .outerjoin(
+            AccountMigration,
+            and_(
+                AccountMigration.campaign_id == ExceptionRecord.campaign_id,
+                AccountMigration.account_id == ExceptionRecord.account_id,
+            ),
+        )
+        .where(ExceptionRecord.status == "PENDING")
+    )
     if campaign_id:
         query = query.where(ExceptionRecord.campaign_id == campaign_id)
-    return [{
-        "id": row.id, "campaign_id": row.campaign_id, "account_id": row.account_id,
-        "exception_type": row.exception_type, "airflow_dag_run_id": row.airflow_dag_run_id,
-        "hitl_task_id": row.hitl_task_id, "status": row.status,
-        "decision": row.decision, "decision_reason": row.decision_reason,
-        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
-    } for row in session.scalars(query.order_by(ExceptionRecord.id))]
+    return [
+        {
+            "id": row.id,
+            "campaign_id": row.campaign_id,
+            "account_id": row.account_id,
+            "exception_type": row.exception_type,
+            "airflow_dag_run_id": row.airflow_dag_run_id,
+            "hitl_task_id": row.hitl_task_id,
+            "status": row.status,
+            "decision": row.decision,
+            "decision_reason": row.decision_reason,
+            "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+            "account_name": account_name,
+            "arr": arr,
+            "account_status": account_status,
+            "risk": risk,
+            "blocker_type": blocker_type,
+        }
+        for row, account_name, arr, account_status, risk, blocker_type in session.execute(query.order_by(ExceptionRecord.id))
+    ]
 
 
 def clear_all(session: Session) -> None:
