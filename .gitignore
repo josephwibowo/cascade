@@ -9,3 +9,4 @@ __pycache__/
 .astro/config.yaml.lock
 .astro/dag_integrity_exceptions.txt
 .astro/test_dag_integrity_default.py
+ui/package-lock.json
