@@ -107,6 +107,54 @@ def test_rollup_matches_row_scan(tmp_path):
         session.close()
 
 
+def test_rollup_response_keys_are_the_dashboard_contract(tmp_path):
+    """The campaign payload is consumed field-by-field by the UI's Campaign type.
+    Adding a key here is a contract change, so pin the exact shape and order."""
+    session = _session(tmp_path)
+    try:
+        _seed_campaign(session)
+        _seed_account(session, "one")
+        session.commit()
+        assert list(get_campaign_rollup(session, "demo")) == [
+            "id", "name", "change_type", "deadline", "airflow_dag_run_id", "status",
+            "affected_accounts", "affected_arr", "migration_completion",
+            "status_distribution", "risk_distribution", "segment_distribution",
+            "blocked_accounts", "pending_exceptions", "chip_counts", "updated_at",
+        ]
+    finally:
+        session.close()
+
+
+def test_rollup_distributions_are_ordered_by_value(tmp_path):
+    """Dashboard renders these dicts as bar segments in key order and re-reads
+    them on every poll, so the order must not depend on row storage order."""
+    session = _session(tmp_path)
+    try:
+        _seed_campaign(session)
+        seeded = [
+            ("d", "READY_TO_VERIFY", "MEDIUM", "TECHNICAL_BLOCKER"),
+            ("c", "NOT_STARTED", "LOW", "STRATEGIC"),
+            ("b", "MIGRATED", "CRITICAL", "STANDARD"),
+            ("a", "BLOCKED", "HIGH", "CONTRACTUAL"),
+        ]
+        for index, (account_id, status, risk, segment) in enumerate(seeded):
+            _seed_account(session, account_id, status=status, risk=risk, segment=segment, arr=index + 1)
+        session.commit()
+        distributions = ("status_distribution", "risk_distribution", "segment_distribution")
+        rollup = get_campaign_rollup(session, "demo")
+        for key in distributions:
+            assert list(rollup[key]) == sorted(rollup[key]), key
+        # Rewriting a status is what assess_account does; it must not reorder the bars.
+        session.execute(text("UPDATE account_migration SET status = 'MIGRATED' WHERE account_id = 'c'"))
+        session.commit()
+        after = get_campaign_rollup(session, "demo")
+        assert after["status_distribution"]["MIGRATED"] == 2
+        for key in distributions:
+            assert list(after[key]) == sorted(after[key]), key
+    finally:
+        session.close()
+
+
 def test_query_accounts_chip_pushdown_matches_python(tmp_path):
     session = _session(tmp_path)
     try:

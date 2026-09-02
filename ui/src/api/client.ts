@@ -4,7 +4,7 @@ export type Campaign = {
   status_distribution: Record<string, number>; risk_distribution: Record<string, number>;
   segment_distribution: Record<string, number>; blocked_accounts: number; pending_exceptions: number;
   chip_counts: Record<string, number>;
-  airflow_dag_run_id?: string | null; verification_run_id?: string | null;
+  airflow_dag_run_id?: string | null;
 };
 export type Account = {
   campaign_id: string; account_id: string; account_name: string; arr: number; tier: string; owner: string; region: string;
