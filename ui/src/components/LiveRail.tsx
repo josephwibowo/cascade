@@ -1,8 +1,15 @@
-import {useEffect, useState} from 'react';
-import {api} from '../api/client';
+import {useEffect, useRef, useState} from 'react';
+import {api, type AirflowTask} from '../api/client';
 
-export default function LiveRail({campaignId, refreshKey}: {campaignId: string; refreshKey?: number}) {
+export default function LiveRail({campaignId, refreshKey, onRun}: {campaignId: string; refreshKey?: number; onRun?: (task: AirflowTask) => void}) {
   const [data, setData] = useState<Awaited<ReturnType<typeof api.orchestration>> | null>(null);
+  // The rail is already the one poller of the orchestration endpoint, so it
+  // reports the run it finds rather than letting anything else poll for the
+  // same answer. Held in a ref so a new callback identity per parent render
+  // cannot tear the poller down and restart it.
+  const report = useRef(onRun);
+  report.current = onRun;
+  const reportedRun = useRef<string | null>(null);
   useEffect(() => {
     let active = true;
     let timer: number | undefined;
@@ -21,6 +28,10 @@ export default function LiveRail({campaignId, refreshKey}: {campaignId: string; 
     const poll = () => api.orchestration(campaignId).then(value => {
       if (!active) return;
       setData(value);
+      if (value.dag_id && value.run_id && value.run_id !== reportedRun.current) {
+        reportedRun.current = value.run_id;
+        report.current?.({dag_id: value.dag_id, run_id: value.run_id, task_id: value.task_id || '', map_index: -1});
+      }
       const state = String(value.dag_run_state ?? value.run_state ?? value.state ?? '').toLowerCase();
       if (terminal.has(state)) return stop();
       again();

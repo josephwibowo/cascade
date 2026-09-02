@@ -1,5 +1,5 @@
 import {useCallback, useEffect, useRef, useState} from 'react';
-import {api, type Campaign} from '../api/client';
+import {api, type AirflowTask, type Campaign} from '../api/client';
 import AccountTable, {type Filters} from './AccountTable';
 import AccountDrawer from './AccountDrawer';
 import ExceptionQueue from './ExceptionQueue';
@@ -35,12 +35,13 @@ export default function Dashboard({campaignId}: {campaignId: string}) {
   // The campaign rollup only ever describes the assessment run (that response
   // is a pinned dashboard contract). Whichever run the campaign currently
   // points at — assessment or, once verification starts, migration_verification
-  // — comes from the orchestration endpoint instead, same as LiveRail and
-  // ScenarioControls already read it.
-  const [orchestration, setOrchestration] = useState<{dag_id: string; run_id: string; task_id: string} | null>(null);
+  // — is reported up by LiveRail, which already polls the orchestration
+  // endpoint. Polling it a second time here would put a third caller on the
+  // most expensive endpoint on the page, which is what 63ad187 fixed.
+  const [currentRun, setCurrentRun] = useState<AirflowTask | null>(null);
 
   const load = useCallback(async () => {
-    const [campaignResult, exceptionsResult, orchestrationResult] = await Promise.allSettled([api.campaign(campaignId), api.exceptions(), api.orchestration(campaignId)]);
+    const [campaignResult, exceptionsResult] = await Promise.allSettled([api.campaign(campaignId), api.exceptions()]);
     let latest = campaignRef.current;
     if (campaignResult.status === 'fulfilled') {
       latest = campaignResult.value;
@@ -54,10 +55,6 @@ export default function Dashboard({campaignId}: {campaignId: string}) {
     if (exceptionsResult.status === 'fulfilled') {
       setExceptionCount(exceptionsResult.value.product_exception_count);
       setAwaiting(exceptionsResult.value.airflow_awaiting_input);
-    }
-    if (orchestrationResult.status === 'fulfilled') {
-      const value = orchestrationResult.value;
-      setOrchestration(value.dag_id && value.run_id ? {dag_id: value.dag_id, run_id: value.run_id, task_id: value.task_id || 'assess_account'} : null);
     }
     return latest;
   }, [campaignId]);
@@ -92,9 +89,12 @@ export default function Dashboard({campaignId}: {campaignId: string}) {
   const chooseRisk = (risk: string) => setFilters(current => ({...current, risk: current.risk === risk ? undefined : risk}));
   const statusLabel = (status: string) => status.replaceAll('_',' ');
   const activeFilters = Object.entries(filters).filter(([, value]) => value);
+  // Correct immediately from the campaign's assessment run, then upgraded to
+  // whichever run the rail reports — including migration_verification.
+  const headerTask = currentRun || (campaign.airflow_dag_run_id ? {dag_id: 'product_change_assessment', run_id: campaign.airflow_dag_run_id, task_id: 'assess_account', map_index: -1} : null);
 
   return <div className="csc-shell">
-    <header className="csc-header"><div><div className="csc-eyebrow">Product change control plane</div><h1 className="csc-title">{campaign.name}</h1><div className="csc-subtitle">{campaign.change_type} · deadline {campaign.deadline}</div></div><div className="csc-header-actions"><ScenarioControls campaignId={campaignId} onSuccess={onScenarioAction} /><ViewOrchestration task={orchestration ? {dag_id:orchestration.dag_id,run_id:orchestration.run_id,task_id:orchestration.task_id,map_index:-1} : null} /></div></header>
+    <header className="csc-header"><div><div className="csc-eyebrow">Product change control plane</div><h1 className="csc-title">{campaign.name}</h1><div className="csc-subtitle">{campaign.change_type} · deadline {campaign.deadline}</div></div><div className="csc-header-actions"><ScenarioControls campaignId={campaignId} onSuccess={onScenarioAction} /><ViewOrchestration task={headerTask} /></div></header>
     <div className="csc-grid">
       <Metric label="Affected accounts" value={campaign.affected_accounts} onClick={clearFilters} />
       <Metric label="Affected ARR" value={`$${campaign.affected_arr.toLocaleString()}`} onClick={clearFilters} />
@@ -105,7 +105,7 @@ export default function Dashboard({campaignId}: {campaignId: string}) {
     </div>
     <div className="csc-panel"><h2>Lifecycle distribution</h2><div className="csc-bar">{Object.entries(statuses).map(([status,count]) => <button aria-label={`${statusLabel(status)} ${count}`} key={status} className={`csc-${status}`} style={{width:`${count / total * 100}%`}} onClick={() => chooseStatus(status)} />)}</div><div className="csc-subtitle csc-distribution-legend">{Object.entries(statuses).map(([status,count]) => <button className="csc-link" data-active={filters.status === status} onClick={() => chooseStatus(status)} key={status}>{statusLabel(status)} {count.toLocaleString()}</button>)}</div></div>
     <div className="csc-panel"><h2>Risk distribution</h2><div className="csc-bar">{Object.entries(risks).map(([risk,count]) => <button aria-label={`${risk} ${count}`} key={risk} className={`csc-risk-${risk}`} style={{width:`${count / total * 100}%`}} onClick={() => chooseRisk(risk)} />)}</div><div className="csc-subtitle csc-distribution-legend">{Object.entries(risks).map(([risk,count]) => <button className="csc-link" data-active={filters.risk === risk} onClick={() => chooseRisk(risk)} key={risk}>{statusLabel(risk)} {count.toLocaleString()}</button>)}</div></div>
-    <div className="csc-layout"><main><h2>Blast radius</h2>{activeFilters.length > 0 && <div className="csc-filter-bar" aria-label="Active filters">{activeFilters.map(([key, value]) => <button className="csc-filter-token" key={key} onClick={() => setFilters(current => ({...current, [key]: undefined}))}>{filterLabel(key, String(value))} ×</button>)}<button className="csc-link" onClick={clearFilters}>Clear all</button></div>}<AccountTable campaignId={campaignId} refreshKey={dataRevision} filters={filters} onFiltersChange={setFilters} onSelect={account => setSelected({account_id: account.account_id, campaign_id: account.campaign_id})} /></main><LiveRail campaignId={campaignId} refreshKey={railRevision} /></div>
+    <div className="csc-layout"><main><h2>Blast radius</h2>{activeFilters.length > 0 && <div className="csc-filter-bar" aria-label="Active filters">{activeFilters.map(([key, value]) => <button className="csc-filter-token" key={key} onClick={() => setFilters(current => ({...current, [key]: undefined}))}>{filterLabel(key, String(value))} ×</button>)}<button className="csc-link" onClick={clearFilters}>Clear all</button></div>}<AccountTable campaignId={campaignId} refreshKey={dataRevision} filters={filters} onFiltersChange={setFilters} onSelect={account => setSelected({account_id: account.account_id, campaign_id: account.campaign_id})} /></main><LiveRail campaignId={campaignId} refreshKey={railRevision} onRun={setCurrentRun} /></div>
     {selected && <AccountDrawer campaignId={selected.campaign_id} accountId={selected.account_id} onClose={() => setSelected(null)} onOpenExceptions={() => setShowQueue(true)} />}
     {showQueue && <ExceptionQueue campaignId={campaignId} onClose={() => setShowQueue(false)} onUpdated={() => {void load()}} />}
   </div>;
