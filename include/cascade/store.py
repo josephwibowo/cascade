@@ -340,10 +340,14 @@ def get_campaign_rollup(session: Session, campaign_id: str) -> dict[str, Any] | 
     affected_arr = counts[1] or 0.0
 
     def distribution(column: Any) -> dict[str, int]:
+        # Order by the value, not the count. The dashboard renders these dicts
+        # as bar segments in key order and now re-reads them every few seconds,
+        # so the ordering has to survive a DAG rewriting statuses mid-run.
+        # Grouping alone does not guarantee that on either backend.
         return {
             value: int(count)
             for value, count in session.execute(
-                select(column, func.count()).where(campaign_clause).group_by(column)
+                select(column, func.count()).where(campaign_clause).group_by(column).order_by(column)
             ).all()
         }
 
@@ -360,7 +364,6 @@ def get_campaign_rollup(session: Session, campaign_id: str) -> dict[str, Any] | 
         "change_type": campaign.change_type,
         "deadline": campaign.deadline.isoformat() if campaign.deadline else None,
         "airflow_dag_run_id": campaign.airflow_dag_run_id,
-        "verification_run_id": campaign.verification_run_id,
         "status": campaign.status,
         "affected_accounts": affected_accounts if affected_accounts else campaign.affected_accounts,
         "affected_arr": affected_arr if affected_accounts else campaign.affected_arr,

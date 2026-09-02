@@ -3,18 +3,15 @@ import {api} from '../api/client';
 
 const TERMINAL_STATES = new Set(['success', 'failed', 'upstream_failed', 'skipped', 'removed', 'cancelled', 'canceled']);
 
-export default function ScenarioControls({campaignId, verificationRunId, onSuccess}: {campaignId: string; verificationRunId?: string | null; onSuccess: () => Promise<unknown> | void}) {
+export default function ScenarioControls({campaignId, onSuccess}: {campaignId: string; onSuccess: () => Promise<unknown> | void}) {
   const [snapshot, setSnapshot] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [triggeredRunId, setTriggeredRunId] = useState<string | null>(null);
-  const [verificationState, setVerificationState] = useState<string | null>(null);
+  // Until the current verification run has been observed as terminal, keep the
+  // control disabled. This derives from Airflow's DAG run rather than campaign
+  // lifecycle status (the day-7 wave intentionally leaves that IN_PROGRESS).
+  const [verificationActive, setVerificationActive] = useState(false);
+  const [pollKey, setPollKey] = useState(0);
   const [error, setError] = useState('');
-
-  // Prefer a run returned by a just-completed action until Dashboard's
-  // campaign refresh delivers the same persisted identity. This closes the
-  // small window in which a successful trigger could otherwise be clicked a
-  // second time, while the campaign prop also makes the state reload-safe.
-  const currentRunId = triggeredRunId || verificationRunId || null;
 
   useEffect(() => {
     api.scenario().then(value => setSnapshot(value.snapshot)).catch(reason => setError(String(reason)));
@@ -23,39 +20,28 @@ export default function ScenarioControls({campaignId, verificationRunId, onSucce
   useEffect(() => {
     let active = true;
     let timer: number | undefined;
-    if (!currentRunId) {
-      setVerificationState(null);
-      return () => undefined;
-    }
-    setVerificationState(null);
     const stop = () => {active = false; if (timer !== undefined) window.clearTimeout(timer)};
     const again = () => {if (active) timer = window.setTimeout(poll, 2200)};
     const poll = () => api.orchestration(campaignId).then(value => {
       if (!active) return;
-      // The endpoint reads the same persisted current run that Dashboard does.
-      // If a parent refresh raced the trigger, follow the newer identity.
-      if (value.run_id && value.run_id !== currentRunId) {
-        setTriggeredRunId(value.run_id);
-        return;
-      }
+      // The endpoint reports whichever run the campaign currently points at, so
+      // a migration_verification dag_id is the run this control owns. Reading it
+      // per poll — rather than from a prop — keeps a mid-run reload guarded
+      // without widening the campaign rollup's response contract.
       const state = String(value.dag_run_state ?? value.run_state ?? value.state ?? '').toLowerCase();
-      setVerificationState(state);
-      if (!TERMINAL_STATES.has(state)) again();
+      const running = value.dag_id === 'migration_verification' && !TERMINAL_STATES.has(state);
+      setVerificationActive(running);
+      // Nothing else in this screen starts a run, so stop chaining once the run
+      // settles; a trigger below restarts the poller through pollKey.
+      if (running) again();
     }).catch(() => {
-      if (!active) return;
-      // An active run stays guarded when Airflow is briefly unavailable; a
-      // retry will establish its terminal state before re-enabling the button.
-      setVerificationState(null);
-      again();
+      // Airflow being briefly unavailable must not unlock the button under an
+      // active run; retry until a poll establishes the real state.
+      if (active) again();
     });
     poll();
     return stop;
-  }, [campaignId, currentRunId]);
-
-  // Until the current run has been observed as terminal, keep controls
-  // disabled. This derives from Airflow's DAG run rather than campaign
-  // lifecycle status (the day-7 wave intentionally leaves that IN_PROGRESS).
-  const verificationActive = Boolean(currentRunId && !TERMINAL_STATES.has(verificationState || ''));
+  }, [campaignId, pollKey]);
 
   const advance = async () => {
     if (!snapshot || busy || verificationActive) return;
@@ -65,13 +51,13 @@ export default function ScenarioControls({campaignId, verificationRunId, onSucce
       if (snapshot === 'day0') {
         const result = await api.advance('day7');
         setSnapshot(result.snapshot);
-        setVerificationState(null);
-        setTriggeredRunId(result.dag_run_id || result.run_id || null);
       } else {
-        const result = await api.verify(campaignId);
-        setVerificationState(null);
-        setTriggeredRunId(result.dag_run_id || result.run_id || null);
+        await api.verify(campaignId);
       }
+      // Both routes persist the new run before answering, so guard the control
+      // immediately and let the restarted poller take over from here.
+      setVerificationActive(true);
+      setPollKey(value => value + 1);
       await onSuccess();
     } catch (reason) {
       setError(String(reason));

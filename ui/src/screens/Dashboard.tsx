@@ -23,6 +23,9 @@ export default function Dashboard({campaignId}: {campaignId: string}) {
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const campaignRef = useRef<Campaign | null>(null);
   const [dataRevision, setDataRevision] = useState(0);
+  // Bumped only when a scenario action triggers a new Airflow run, so the rail
+  // restarts on a real run change rather than on every campaign poll.
+  const [railRevision, setRailRevision] = useState(0);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState<{account_id: string; campaign_id: string} | null>(null);
   const [filters, setFilters] = useState<Filters>({});
@@ -48,6 +51,11 @@ export default function Dashboard({campaignId}: {campaignId: string}) {
     }
     return latest;
   }, [campaignId]);
+
+  const onScenarioAction = useCallback(async () => {
+    setRailRevision(value => value + 1);
+    await load();
+  }, [load]);
 
   useEffect(() => {
     let active = true;
@@ -76,7 +84,7 @@ export default function Dashboard({campaignId}: {campaignId: string}) {
   const activeFilters = Object.entries(filters).filter(([, value]) => value);
 
   return <div className="csc-shell">
-    <header className="csc-header"><div><div className="csc-eyebrow">Product change control plane</div><h1 className="csc-title">{campaign.name}</h1><div className="csc-subtitle">{campaign.change_type} · deadline {campaign.deadline}</div></div><div className="csc-header-actions"><ScenarioControls campaignId={campaignId} verificationRunId={campaign.verification_run_id} onSuccess={load} /><ViewOrchestration task={campaign.airflow_dag_run_id ? {dag_id:'product_change_assessment',run_id:campaign.airflow_dag_run_id,task_id:'assess_account',map_index:-1} : null} /></div></header>
+    <header className="csc-header"><div><div className="csc-eyebrow">Product change control plane</div><h1 className="csc-title">{campaign.name}</h1><div className="csc-subtitle">{campaign.change_type} · deadline {campaign.deadline}</div></div><div className="csc-header-actions"><ScenarioControls campaignId={campaignId} onSuccess={onScenarioAction} /><ViewOrchestration task={campaign.airflow_dag_run_id ? {dag_id:'product_change_assessment',run_id:campaign.airflow_dag_run_id,task_id:'assess_account',map_index:-1} : null} /></div></header>
     <div className="csc-grid">
       <Metric label="Affected accounts" value={campaign.affected_accounts} onClick={clearFilters} />
       <Metric label="Affected ARR" value={`$${campaign.affected_arr.toLocaleString()}`} onClick={clearFilters} />
@@ -87,7 +95,7 @@ export default function Dashboard({campaignId}: {campaignId: string}) {
     </div>
     <div className="csc-panel"><h2>Lifecycle distribution</h2><div className="csc-bar">{Object.entries(statuses).map(([status,count]) => <button aria-label={`${statusLabel(status)} ${count}`} key={status} className={`csc-${status}`} style={{width:`${count / total * 100}%`}} onClick={() => chooseStatus(status)} />)}</div><div className="csc-subtitle csc-distribution-legend">{Object.entries(statuses).map(([status,count]) => <button className="csc-link" data-active={filters.status === status} onClick={() => chooseStatus(status)} key={status}>{statusLabel(status)} {count.toLocaleString()}</button>)}</div></div>
     <div className="csc-panel"><h2>Risk distribution</h2><div className="csc-bar">{Object.entries(risks).map(([risk,count]) => <button aria-label={`${risk} ${count}`} key={risk} className={`csc-risk-${risk}`} style={{width:`${count / total * 100}%`}} onClick={() => chooseRisk(risk)} />)}</div><div className="csc-subtitle csc-distribution-legend">{Object.entries(risks).map(([risk,count]) => <button className="csc-link" data-active={filters.risk === risk} onClick={() => chooseRisk(risk)} key={risk}>{statusLabel(risk)} {count.toLocaleString()}</button>)}</div></div>
-    <div className="csc-layout"><main><h2>Blast radius</h2>{activeFilters.length > 0 && <div className="csc-filter-bar" aria-label="Active filters">{activeFilters.map(([key, value]) => <button className="csc-filter-token" key={key} onClick={() => setFilters(current => ({...current, [key]: undefined}))}>{filterLabel(key, String(value))} ×</button>)}<button className="csc-link" onClick={clearFilters}>Clear all</button></div>}<AccountTable campaignId={campaignId} refreshKey={dataRevision} filters={filters} onFiltersChange={setFilters} onSelect={account => setSelected({account_id: account.account_id, campaign_id: account.campaign_id})} /></main><LiveRail campaignId={campaignId} runId={campaign.verification_run_id || campaign.airflow_dag_run_id} /></div>
+    <div className="csc-layout"><main><h2>Blast radius</h2>{activeFilters.length > 0 && <div className="csc-filter-bar" aria-label="Active filters">{activeFilters.map(([key, value]) => <button className="csc-filter-token" key={key} onClick={() => setFilters(current => ({...current, [key]: undefined}))}>{filterLabel(key, String(value))} ×</button>)}<button className="csc-link" onClick={clearFilters}>Clear all</button></div>}<AccountTable campaignId={campaignId} refreshKey={dataRevision} filters={filters} onFiltersChange={setFilters} onSelect={account => setSelected({account_id: account.account_id, campaign_id: account.campaign_id})} /></main><LiveRail campaignId={campaignId} refreshKey={railRevision} /></div>
     {selected && <AccountDrawer campaignId={selected.campaign_id} accountId={selected.account_id} onClose={() => setSelected(null)} onOpenExceptions={() => setShowQueue(true)} />}
     {showQueue && <ExceptionQueue campaignId={campaignId} onClose={() => setShowQueue(false)} onUpdated={() => {void load()}} />}
   </div>;
