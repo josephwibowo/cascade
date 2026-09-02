@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT / "include"))
 
 from cascade.airflow_client import AirflowClient
 from cascade.mock_client import MockSystemsClient
-from cascade.store import create_session_factory, ensure_schema, get_campaign_rollup, upsert_campaign
+from cascade.store import create_session_factory, ensure_schema, get_campaign, get_campaign_rollup, upsert_campaign
 
 
 def main() -> None:
@@ -50,9 +50,9 @@ def main() -> None:
         raise AssertionError(f"Expected >1,000 successful mapped tasks, got {successful}")
     session = create_session_factory()()
     try:
-        campaign = session.get(__import__("cascade.models", fromlist=["Campaign"]).Campaign, "api_v1_sunset")
+        campaign = get_campaign(session, "api_v1_sunset")
         if campaign:
-            upsert_campaign(session, {"id": campaign.id, "name": campaign.name, "change_type": campaign.change_type, "deadline": campaign.deadline, "airflow_dag_run_id": run_id, "verification_run_id": None, "status": campaign.status})
+            upsert_campaign(session, {"id": campaign["id"], "name": campaign["name"], "change_type": campaign["change_type"], "deadline": campaign["deadline"], "airflow_dag_run_id": run_id, "verification_run_id": None, "status": campaign["status"]})
             session.commit()
         rollup = get_campaign_rollup(session, "api_v1_sunset")
     finally:

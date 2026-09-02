@@ -19,7 +19,17 @@ from cascade.briefs import MigrationBrief, deterministic_brief
 from cascade.mock_client import MockSystemsClient
 from cascade.rules import compute_risk, compute_status, zero_v1_streak
 from cascade.states import Segment
-from cascade.store import create_session_factory, ensure_schema, upsert_account_migration, upsert_campaign, upsert_exception, append_timeline_event
+from cascade.store import (
+    append_timeline_event,
+    create_session_factory,
+    ensure_schema,
+    get_account,
+    update_account_migration,
+    update_exception,
+    upsert_account_migration,
+    upsert_campaign,
+    upsert_exception,
+)
 
 
 @dag(
@@ -152,12 +162,15 @@ def product_change_assessment():
             brief_source = "deterministic"
         session = create_session_factory()()
         try:
-            from cascade.store import get_account
-            account = get_account(session, evidence["account_id"], evidence.get("campaign_id"))
+            campaign_id = evidence.get("campaign_id", "api_v1_sunset")
+            account = get_account(session, evidence["account_id"], campaign_id)
             if account:
-                from cascade.models import AccountMigration
-                from sqlalchemy import update
-                session.execute(update(AccountMigration).where(AccountMigration.campaign_id == evidence.get("campaign_id", "api_v1_sunset"), AccountMigration.account_id == evidence["account_id"]).values(brief=brief.model_dump(), brief_source=brief_source))
+                update_account_migration(
+                    session,
+                    campaign_id,
+                    evidence["account_id"],
+                    {"brief": brief.model_dump(), "brief_source": brief_source},
+                )
                 session.commit()
         finally:
             session.close()
@@ -181,9 +194,11 @@ def product_change_assessment():
             return
         session = create_session_factory()()
         try:
-            from sqlalchemy import update
-            from cascade.models import ExceptionRecord
-            session.execute(update(ExceptionRecord).where(ExceptionRecord.id == "exception-acme_logistics").values(airflow_dag_run_id=run_id, hitl_task_id="await_decision"))
+            update_exception(
+                session,
+                "exception-acme_logistics",
+                {"airflow_dag_run_id": run_id, "hitl_task_id": "await_decision"},
+            )
             session.commit()
         finally:
             session.close()

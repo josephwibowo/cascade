@@ -145,6 +145,76 @@ def upsert_exception(session: Session, values: Mapping[str, Any]) -> ExceptionRe
     return session.get(ExceptionRecord, payload["id"])
 
 
+def update_account_migration(
+    session: Session,
+    campaign_id: str,
+    account_id: str,
+    values: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Update an assessed account while keeping model access in this module."""
+
+    account = session.get(AccountMigration, (campaign_id, account_id))
+    if account is None:
+        return None
+    for key, value in values.items():
+        if key in {"campaign_id", "account_id"}:
+            continue
+        setattr(account, key, value)
+    session.flush()
+    return _account_dict(account)
+
+
+def get_exception(session: Session, exception_id: str) -> dict[str, Any] | None:
+    row = session.get(ExceptionRecord, exception_id)
+    if row is None:
+        return None
+    return {
+        "id": row.id,
+        "campaign_id": row.campaign_id,
+        "account_id": row.account_id,
+        "exception_type": row.exception_type,
+        "airflow_dag_run_id": row.airflow_dag_run_id,
+        "hitl_task_id": row.hitl_task_id,
+        "status": row.status,
+        "decision": row.decision,
+        "decision_reason": row.decision_reason,
+        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+    }
+
+
+def update_exception(session: Session, exception_id: str, values: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Update an exception record and return its API-safe representation."""
+
+    row = session.get(ExceptionRecord, exception_id)
+    if row is None:
+        return None
+    for key, value in values.items():
+        if key == "id":
+            continue
+        setattr(row, key, value)
+    session.flush()
+    return get_exception(session, exception_id)
+
+
+def get_campaign(session: Session, campaign_id: str) -> dict[str, Any] | None:
+    campaign = session.get(Campaign, campaign_id)
+    if campaign is None:
+        return None
+    return {
+        "id": campaign.id,
+        "name": campaign.name,
+        "change_type": campaign.change_type,
+        "deadline": campaign.deadline,
+        "airflow_dag_run_id": campaign.airflow_dag_run_id,
+        "verification_run_id": campaign.verification_run_id,
+        "status": campaign.status,
+        "affected_accounts": campaign.affected_accounts,
+        "affected_arr": campaign.affected_arr,
+        "created_at": campaign.created_at,
+        "updated_at": campaign.updated_at,
+    }
+
+
 def _account_dict(account: AccountMigration) -> dict[str, Any]:
     return {
         "campaign_id": account.campaign_id,
@@ -184,6 +254,20 @@ def get_campaign_rollup(session: Session, campaign_id: str) -> dict[str, Any] | 
         risk_distribution[row.risk] = risk_distribution.get(row.risk, 0) + 1
         segment_distribution[row.segment] = segment_distribution.get(row.segment, 0) + 1
     pending_exceptions = session.scalar(select(func.count()).select_from(ExceptionRecord).where(ExceptionRecord.campaign_id == campaign_id, ExceptionRecord.status == "PENDING")) or 0
+    chip_counts = {
+        "straightforward": sum(
+            row.segment == "STANDARD" and row.status == "NOT_STARTED" and sum(row.daily_v2 or []) > 0
+            for row in rows
+        ),
+        "actively_migrating": sum(row.status == "IN_PROGRESS" for row in rows),
+        "no_progress": sum(
+            row.status == "NOT_STARTED" and sum(row.daily_v1 or []) > 0 and sum(row.daily_v2 or []) == 0
+            for row in rows
+        ),
+        "strategic": sum(row.segment == "STRATEGIC" for row in rows),
+        "contractual": sum(row.segment == "CONTRACTUAL" for row in rows),
+        "technical_blocker": sum(row.segment == "TECHNICAL_BLOCKER" for row in rows),
+    }
     return {
         "id": campaign.id,
         "name": campaign.name,
@@ -199,6 +283,7 @@ def get_campaign_rollup(session: Session, campaign_id: str) -> dict[str, Any] | 
         "segment_distribution": segment_distribution,
         "blocked_accounts": status_distribution.get("BLOCKED", 0),
         "pending_exceptions": pending_exceptions,
+        "chip_counts": chip_counts,
         "updated_at": campaign.updated_at.isoformat() if campaign.updated_at else None,
     }
 
@@ -277,3 +362,48 @@ def clear_all(session: Session) -> None:
     session.execute(delete(AccountMigration))
     session.execute(delete(Campaign))
     session.commit()
+
+
+def database_counts(session: Session) -> dict[str, int]:
+    """Return row counts used by reset verification."""
+
+    return {
+        "campaign": int(session.scalar(select(func.count()).select_from(Campaign)) or 0),
+        "account_migration": int(session.scalar(select(func.count()).select_from(AccountMigration)) or 0),
+        "exception": int(session.scalar(select(func.count()).select_from(ExceptionRecord)) or 0),
+        "timeline_event": int(session.scalar(select(func.count()).select_from(TimelineEvent)) or 0),
+    }
+
+
+def aggregate_campaign_projection(session: Session, campaign_id: str) -> dict[str, Any]:
+    """Recompute and persist a campaign projection using only store internals."""
+
+    campaign = session.get(Campaign, campaign_id)
+    if campaign is None:
+        raise ValueError(f"Campaign {campaign_id!r} does not exist")
+    counts = session.execute(
+        select(func.count(AccountMigration.account_id), func.coalesce(func.sum(AccountMigration.arr), 0))
+        .where(AccountMigration.campaign_id == campaign_id)
+    ).one()
+    status = session.execute(
+        select(AccountMigration.status, func.count())
+        .where(AccountMigration.campaign_id == campaign_id)
+        .group_by(AccountMigration.status)
+    ).all()
+    migrated = next((count for value, count in status if value == "MIGRATED"), 0)
+    total = counts[0] or 0
+    next_status = "MIGRATED" if total and migrated == total else "IN_PROGRESS"
+    upsert_campaign(session, {
+        "id": campaign_id,
+        "name": campaign.name,
+        "change_type": campaign.change_type,
+        "deadline": campaign.deadline,
+        "airflow_dag_run_id": campaign.airflow_dag_run_id,
+        "verification_run_id": campaign.verification_run_id,
+        "status": next_status,
+        "affected_accounts": total,
+        "affected_arr": float(counts[1] or 0),
+        "updated_at": datetime.now(timezone.utc),
+    })
+    session.commit()
+    return get_campaign_rollup(session, campaign_id) or {}

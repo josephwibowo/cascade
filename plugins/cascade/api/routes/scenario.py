@@ -5,8 +5,7 @@ from pydantic import BaseModel
 
 from cascade.airflow_client import AirflowAPIError, AirflowClient
 from cascade.mock_client import MockSystemsClient
-from cascade.models import Campaign
-from cascade.store import create_session_factory, upsert_campaign
+from cascade.store import create_session_factory, get_campaign, upsert_campaign
 
 router = APIRouter(prefix="/scenario", tags=["scenario"])
 orchestration_router = APIRouter(prefix="/orchestration", tags=["orchestration"])
@@ -28,9 +27,9 @@ def advance(request: AdvanceRequest):
     run_id = run.get("dag_run_id") or run.get("run_id")
     session = create_session_factory()()
     try:
-        campaign = session.get(Campaign, "api_v1_sunset")
+        campaign = get_campaign(session, "api_v1_sunset")
         if campaign and run_id:
-            upsert_campaign(session, {"id": campaign.id, "name": campaign.name, "change_type": campaign.change_type, "deadline": campaign.deadline, "airflow_dag_run_id": campaign.airflow_dag_run_id, "verification_run_id": run_id, "status": campaign.status})
+            upsert_campaign(session, {"id": campaign["id"], "name": campaign["name"], "change_type": campaign["change_type"], "deadline": campaign["deadline"], "airflow_dag_run_id": campaign["airflow_dag_run_id"], "verification_run_id": run_id, "status": campaign["status"]})
             session.commit()
     finally:
         session.close()
@@ -41,11 +40,11 @@ def advance(request: AdvanceRequest):
 def orchestration(campaign_id: str):
     session = create_session_factory()()
     try:
-        campaign = session.get(Campaign, campaign_id)
+        campaign = get_campaign(session, campaign_id)
         if not campaign:
             raise HTTPException(status_code=404, detail="Campaign not found")
-        verification_run_id = getattr(campaign, "verification_run_id", None)
-        run_id = verification_run_id or campaign.airflow_dag_run_id
+        verification_run_id = campaign.get("verification_run_id")
+        run_id = verification_run_id or campaign.get("airflow_dag_run_id")
     finally:
         session.close()
     if not run_id:

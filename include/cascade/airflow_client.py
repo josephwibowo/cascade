@@ -23,6 +23,8 @@ class AirflowClient:
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise AirflowAPIError(str(exc)) from exc
+        if response.status_code == 204:
+            return {}
         return response.json()
 
     def trigger_dag(self, dag_id: str, conf: dict[str, Any] | None = None, logical_date: str | None = None) -> dict[str, Any]:
@@ -64,10 +66,26 @@ class AirflowClient:
         payload = self._request("GET", f"/dags/{dag_id}/dagRuns/{run_id}/hitlDetails")
         if isinstance(payload, list):
             return payload
-        return payload.get("hitl_details", payload.get("items", []))
+        details = payload.get("hitl_details", payload.get("items"))
+        if details is not None:
+            return details if isinstance(details, list) else [details]
+        # Some Airflow versions return one detail object directly for an
+        # unmapped HITL task rather than wrapping it in a list.
+        return [payload] if any(key in payload for key in ("subject", "body", "options", "params", "parameters")) else []
 
-    def submit_hitl(self, dag_id: str, run_id: str, task_id: str, map_index: int, chosen_options: list[str], reason: str) -> dict[str, Any]:
-        return self._request("PATCH", f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{task_id}/{map_index}/hitlDetails", json={"chosen_options": chosen_options, "params_input": {"reason": reason}})  # type: ignore[return-value]
+    def submit_hitl(
+        self,
+        dag_id: str,
+        run_id: str,
+        task_id: str,
+        map_index: int,
+        chosen_options: list[str],
+        reason: str,
+        params_input: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        values = dict(params_input or {})
+        values.setdefault("reason", reason)
+        return self._request("PATCH", f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{task_id}/{map_index}/hitlDetails", json={"chosen_options": chosen_options, "params_input": values})  # type: ignore[return-value]
 
     def wait_for_task_terminal(self, dag_id: str, run_id: str, task_id: str, map_index: int = -1, timeout: float = 120.0) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
@@ -80,9 +98,20 @@ class AirflowClient:
         raise AirflowAPIError(f"Timed out waiting for {dag_id}/{run_id}/{task_id}")
 
     def orchestration_counts(self, dag_id: str, run_id: str, task_id: str) -> dict[str, Any]:
+        run = self.dag_run(dag_id, run_id)
         instances = self.list_mapped(dag_id, run_id, task_id)
         counts: dict[str, int] = {}
         for instance in instances:
             state = str(instance.get("state") or "none")
             counts[state] = counts.get(state, 0) + 1
-        return {"dag_id": dag_id, "run_id": run_id, "task_id": task_id, "mapped": len(instances), "states": counts, **counts}
+        run_state = run.get("state") or run.get("dag_run_state")
+        return {
+            "dag_id": dag_id,
+            "run_id": run_id,
+            "task_id": task_id,
+            "dag_run_state": run_state,
+            "run_state": run_state,
+            "mapped": len(instances),
+            "states": counts,
+            **counts,
+        }
