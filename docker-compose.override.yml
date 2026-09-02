@@ -1,0 +1,9 @@
+services:
+  mock-services:
+    build: ./mock_services
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./mock_services:/app
+    networks:
+      - airflow

@@ -1,0 +1,11 @@
+.env
+ui/node_modules/
+ui/dist/
+plugins/cascade/static/
+pkgs/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.astro/config.yaml.lock
+.astro/dag_integrity_exceptions.txt
+.astro/test_dag_integrity_default.py

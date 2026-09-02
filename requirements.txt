@@ -1,0 +1,6 @@
+apache-airflow-providers-common-ai[anthropic,openai]
+psycopg[binary]
+httpx
+sqlalchemy>=2.0
+fastapi
+pydantic>=2

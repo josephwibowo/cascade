@@ -1,0 +1,14 @@
+{
+  "campaign_id": "api_v1_sunset",
+  "change_type": "API_DEPRECATION",
+  "deadline": "2026-10-31",
+  "legacy_endpoints": [
+    "/v1/events",
+    "/v1/events/batch"
+  ],
+  "name": "API v1 Sunset",
+  "replacement_endpoints": [
+    "/v2/events",
+    "/v2/events/batch"
+  ]
+}

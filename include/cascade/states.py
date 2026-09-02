@@ -1,0 +1,30 @@
+from enum import StrEnum
+
+
+class Status(StrEnum):
+    NOT_STARTED = "NOT_STARTED"
+    IN_PROGRESS = "IN_PROGRESS"
+    BLOCKED = "BLOCKED"
+    READY_TO_VERIFY = "READY_TO_VERIFY"
+    MIGRATED = "MIGRATED"
+
+
+class Segment(StrEnum):
+    STANDARD = "STANDARD"
+    STRATEGIC = "STRATEGIC"
+    CONTRACTUAL = "CONTRACTUAL"
+    TECHNICAL_BLOCKER = "TECHNICAL_BLOCKER"
+
+
+class Risk(StrEnum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
+class BlockerType(StrEnum):
+    CUSTOM_PARSER = "CUSTOM_PARSER"
+    SDK_PINNED = "SDK_PINNED"
+    CONTRACT_COMMITMENT = "CONTRACT_COMMITMENT"
+    NO_OWNER = "NO_OWNER"
