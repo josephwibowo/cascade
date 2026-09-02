@@ -20,6 +20,10 @@ export default function AccountDrawer({campaignId, accountId, onClose, onOpenExc
     return () => {active = false};
   }, [accountId, campaignId]);
 
+  // Hoisted so the trend bars don't recompute it inside both .map() callbacks
+  // (once per day, per series) on every render.
+  const peak = account ? Math.max(...account.daily_v1, ...account.daily_v2, 1) : 1;
+
   return <aside className="csc-drawer">
     <button className="csc-close" onClick={onClose}>×</button>
     {!account ? <div className="csc-empty">{accountLoading ? 'Loading account…' : 'Account not available.'}</div> : <>
@@ -28,7 +32,7 @@ export default function AccountDrawer({campaignId, accountId, onClose, onOpenExc
       <p><strong>${account.arr.toLocaleString()}</strong> ARR</p>
       <div className="csc-toolbar"><span className={`csc-pill csc-${account.status}`}>{account.status}</span><ViewOrchestration task={account.latest_airflow_task_instance} /></div>
       <div className="csc-card"><div className="csc-label">Telemetry trend · v1 and v2</div>
-        <div className="csc-trend">{account.daily_v1.map((value,index) => <i key={`v1-${index}`} style={{height:`${Math.max(3, value / Math.max(...account.daily_v1, ...account.daily_v2, 1) * 80)}px`}} />)}{account.daily_v2.map((value,index) => <i key={`v2-${index}`} style={{height:`${Math.max(3, value / Math.max(...account.daily_v1, ...account.daily_v2, 1) * 80)}px`,background:'#5bc59a'}} />)}</div>
+        <div className="csc-trend">{account.daily_v1.map((value,index) => <i key={`v1-${index}`} style={{height:`${Math.max(3, value / peak * 80)}px`}} />)}{account.daily_v2.map((value,index) => <i key={`v2-${index}`} style={{height:`${Math.max(3, value / peak * 80)}px`,background:'#5bc59a'}} />)}</div>
         <div className="csc-subtitle">Trailing seven days · legacy {account.legacy_usage.toLocaleString()} · replacement {account.replacement_usage.toLocaleString()}</div>
       </div>
       {account.blocker_type && <div className="csc-note">Blocker: {account.blocker_type}. Contract evidence: {String(account.evidence?.commitment_expiry || 'none')}.</div>}
