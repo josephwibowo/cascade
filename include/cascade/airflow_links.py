@@ -17,7 +17,7 @@ def dag_run_grid_url(
 ) -> str:
     """Return the native Airflow 3 grid URL for one concrete DAG run."""
 
-    return f"{base_url.rstrip('/')}/dags/{_quote(dag_id)}/runs/{_quote(run_id)}/grid"
+    return f"{base_url.rstrip('/')}/dags/{_quote(dag_id)}/runs/{_quote(run_id)}/"
 
 
 def mapped_task_url(
@@ -31,7 +31,9 @@ def mapped_task_url(
     """Return a run grid URL focused on one mapped task instance."""
 
     url = dag_run_grid_url(dag_id, run_id, base_url=base_url)
-    return f"{url}?task_id={_quote(task_id)}&map_index={int(map_index)}"
+    if int(map_index) < 0:
+        return url
+    return f"{url}tasks/{_quote(task_id)}/mapped/{int(map_index)}"
 
 
 def account_task_url(account: dict, *, base_url: str = "") -> str | None:
