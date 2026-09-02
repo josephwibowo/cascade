@@ -3,11 +3,13 @@ from datetime import date
 
 pytest.importorskip("sqlalchemy")
 
-from sqlalchemy import text
+from sqlalchemy import create_engine, inspect, text
 from cascade.models import AccountMigration, Base
 from cascade.store import (
+    _schema_ready,
     chip_facets,
     create_session_factory,
+    ensure_schema,
     get_campaign_rollup,
     get_pending_exceptions,
     query_accounts,
@@ -105,6 +107,33 @@ def test_rollup_matches_row_scan(tmp_path):
         assert rollup["chip_counts"]["technical_blocker"] == 1
     finally:
         session.close()
+
+
+def test_ensure_schema_adds_indexes_declared_after_table_creation(tmp_path):
+    """reset_demo.py deletes rows and never drops tables, and create_all skips a
+    table that exists, so a newly declared index has to reach a database that is
+    upgraded in place."""
+    url = f"sqlite:///{tmp_path / 'schema.db'}"
+    ensure_schema(url)
+    engine = create_engine(url)
+    try:
+        def risk_index_present():
+            return "ix_account_migration_campaign_risk" in {
+                index["name"] for index in inspect(engine).get_indexes("account_migration")
+            }
+
+        with engine.begin() as connection:
+            connection.execute(text("DROP INDEX ix_account_migration_campaign_risk"))
+        assert not risk_index_present()
+        _schema_ready.discard(url)
+        ensure_schema(url)
+        assert risk_index_present()
+        # Re-running against a fully-indexed database must stay a no-op.
+        _schema_ready.discard(url)
+        ensure_schema(url)
+        assert risk_index_present()
+    finally:
+        engine.dispose()
 
 
 def test_rollup_response_keys_are_the_dashboard_contract(tmp_path):

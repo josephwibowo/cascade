@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, case, create_engine, delete, func, or_, select, text, update
+from sqlalchemy import and_, case, create_engine, delete, func, inspect, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
@@ -61,9 +61,35 @@ def ensure_schema(url: str | None = None) -> None:
         engine = create_engine(target, pool_pre_ping=True)
         try:
             Base.metadata.create_all(engine)
+            _create_missing_indexes(engine)
         finally:
             engine.dispose()
         _schema_ready.add(target)
+
+
+def _create_missing_indexes(engine) -> None:
+    """Add indexes declared after a table was first created.
+
+    ``create_all`` skips a table that already exists, and it builds indexes as
+    part of ``CREATE TABLE``, so a newly declared index never reaches a demo
+    database that is upgraded in place — ``reset_demo.py`` deletes rows, it
+    does not drop tables.
+    """
+
+    inspector = inspect(engine)
+    for table in Base.metadata.tables.values():
+        if not inspector.has_table(table.name):
+            continue
+        existing = {index["name"] for index in inspector.get_indexes(table.name)}
+        for index in table.indexes:
+            if index.name in existing:
+                continue
+            try:
+                index.create(engine)
+            except DBAPIError:
+                # Another worker may have created it first; same race the
+                # CREATE DATABASE branch above tolerates.
+                pass
 
 
 def make_engine(url: str | None = None):
