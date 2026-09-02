@@ -14,13 +14,23 @@ cp .env.example .env
 astro dev start
 pnpm --dir ui install
 pnpm --dir ui build
-printf 'airflow dags unpause product_change_assessment exception_resolution migration_verification\n' | astro dev bash -s
+printf 'for d in product_change_assessment exception_resolution migration_verification; do airflow dags unpause "$d"; done\n' | astro dev bash -s
 ```
 
 The Airflow UI is available at `http://localhost:8080/`; the mock vendor
 systems listen on `http://localhost:8001/`. The Cascade plugin is mounted at
 `/cascade` and its React bundle is built into
 `plugins/cascade/static/cascade.umd.cjs`.
+
+If `http://localhost:8001/health` does not answer, the `mock-services`
+container from `docker-compose.override.yml` came up attached to no network,
+which also leaves Airflow unable to resolve `mock-services` and silently
+breaks the scenario controls and telemetry. Compose reuses the container, so
+`astro dev restart` does not repair it. Recreate it:
+
+```bash
+astro dev kill && astro dev start
+```
 
 To rehearse the deterministic hero run from a clean day-zero world:
 
