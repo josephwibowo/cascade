@@ -1,9 +1,28 @@
 services:
   mock-services:
-    build: ./mock_services
+    image: astrocrpublic.azurecr.io/runtime:3.3-7
+    command:
+      - uvicorn
+      - app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
     ports:
       - "8001:8000"
     volumes:
       - ./mock_services:/app
+    working_dir: /app
     networks:
       - airflow
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
