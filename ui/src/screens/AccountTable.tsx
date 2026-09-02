@@ -5,6 +5,14 @@ export type Chip = 'straightforward'|'actively_migrating'|'no_progress'|'strateg
 export type Filters = {status?: string; risk?: string; chip?: Chip; q?: string};
 
 const PAGE_SIZE = 200;
+// The campaigns/accounts route caps `limit` at 500 (see campaigns.py). A
+// refresh has to re-walk every already-loaded row to satisfy invariant #1 in
+// loadPage below, so it fetches in chunks of the server's max rather than
+// PAGE_SIZE: same total rows and bytes, but up to 2.5x fewer round trips per
+// poll once the user has scrolled deep into a large table. Appends and
+// initial/filter loads are unaffected and keep the PAGE_SIZE-sized chunk that
+// matches the virtualized row window.
+const REFRESH_CHUNK_SIZE = 500;
 const chips: {id: Chip; label: string}[] = [
   {id:'straightforward',label:'Straightforward'},
   {id:'actively_migrating',label:'Actively migrating'},
@@ -70,17 +78,21 @@ export default function AccountTable({campaignId, refreshKey = 0, filters, onFil
     // requests sequential and bounded by the prior loaded range so a poll
     // cannot fan out into an unbounded request storm.
     const targetCount = append ? PAGE_SIZE : refreshCount > 0 ? Math.max(PAGE_SIZE, refreshCount) : PAGE_SIZE;
+    // A refresh walk fetches REFRESH_CHUNK_SIZE rows at a time to minimize
+    // round trips; every other call (append, initial load, filter reset)
+    // keeps the PAGE_SIZE chunk that matches the virtualized row window.
+    const chunkSize = append || refreshCount <= 0 ? PAGE_SIZE : REFRESH_CHUNK_SIZE;
     const pages: AccountRow[] = [];
     const seen = new Set<string>();
     let pageFacets: Record<string, number> = {};
     let serverTotal = 0;
-    const maxPages = append || refreshCount <= 0 ? 1 : Math.max(1, Math.ceil(targetCount / PAGE_SIZE) + 1);
+    const maxPages = append || refreshCount <= 0 ? 1 : Math.max(1, Math.ceil(targetCount / chunkSize) + 1);
 
     const fetchPages = async () => {
       let nextOffset = offset;
       let fetchedPageCount = 0;
       while (fetchedPageCount < maxPages) {
-        const value = await api.accounts(campaignId, filterParams(), PAGE_SIZE, nextOffset);
+        const value = await api.accounts(campaignId, filterParams(), chunkSize, nextOffset);
         if (requestId !== requestNumber.current) return;
         fetchedPageCount += 1;
         serverTotal = value.total;
@@ -97,8 +109,8 @@ export default function AccountTable({campaignId, refreshKey = 0, filters, onFil
         // visible, stopping at the new total when the result shrinks.
         if (append || refreshCount <= 0) break;
         const desired = Math.min(targetCount, serverTotal);
-        if (pages.length >= desired || value.items.length < PAGE_SIZE || nextOffset + value.items.length >= serverTotal) break;
-        nextOffset += PAGE_SIZE;
+        if (pages.length >= desired || value.items.length < chunkSize || nextOffset + value.items.length >= serverTotal) break;
+        nextOffset += chunkSize;
       }
       if (requestId !== requestNumber.current) return;
 
