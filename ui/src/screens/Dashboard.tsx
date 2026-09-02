@@ -32,9 +32,15 @@ export default function Dashboard({campaignId}: {campaignId: string}) {
   const [exceptionCount, setExceptionCount] = useState<number | null>(null);
   const [awaiting, setAwaiting] = useState<number | null>(null);
   const [showQueue, setShowQueue] = useState(false);
+  // The campaign rollup only ever describes the assessment run (that response
+  // is a pinned dashboard contract). Whichever run the campaign currently
+  // points at — assessment or, once verification starts, migration_verification
+  // — comes from the orchestration endpoint instead, same as LiveRail and
+  // ScenarioControls already read it.
+  const [orchestration, setOrchestration] = useState<{dag_id: string; run_id: string; task_id: string} | null>(null);
 
   const load = useCallback(async () => {
-    const [campaignResult, exceptionsResult] = await Promise.allSettled([api.campaign(campaignId), api.exceptions()]);
+    const [campaignResult, exceptionsResult, orchestrationResult] = await Promise.allSettled([api.campaign(campaignId), api.exceptions(), api.orchestration(campaignId)]);
     let latest = campaignRef.current;
     if (campaignResult.status === 'fulfilled') {
       latest = campaignResult.value;
@@ -48,6 +54,10 @@ export default function Dashboard({campaignId}: {campaignId: string}) {
     if (exceptionsResult.status === 'fulfilled') {
       setExceptionCount(exceptionsResult.value.product_exception_count);
       setAwaiting(exceptionsResult.value.airflow_awaiting_input);
+    }
+    if (orchestrationResult.status === 'fulfilled') {
+      const value = orchestrationResult.value;
+      setOrchestration(value.dag_id && value.run_id ? {dag_id: value.dag_id, run_id: value.run_id, task_id: value.task_id || 'assess_account'} : null);
     }
     return latest;
   }, [campaignId]);
@@ -84,7 +94,7 @@ export default function Dashboard({campaignId}: {campaignId: string}) {
   const activeFilters = Object.entries(filters).filter(([, value]) => value);
 
   return <div className="csc-shell">
-    <header className="csc-header"><div><div className="csc-eyebrow">Product change control plane</div><h1 className="csc-title">{campaign.name}</h1><div className="csc-subtitle">{campaign.change_type} · deadline {campaign.deadline}</div></div><div className="csc-header-actions"><ScenarioControls campaignId={campaignId} onSuccess={onScenarioAction} /><ViewOrchestration task={campaign.airflow_dag_run_id ? {dag_id:'product_change_assessment',run_id:campaign.airflow_dag_run_id,task_id:'assess_account',map_index:-1} : null} /></div></header>
+    <header className="csc-header"><div><div className="csc-eyebrow">Product change control plane</div><h1 className="csc-title">{campaign.name}</h1><div className="csc-subtitle">{campaign.change_type} · deadline {campaign.deadline}</div></div><div className="csc-header-actions"><ScenarioControls campaignId={campaignId} onSuccess={onScenarioAction} /><ViewOrchestration task={orchestration ? {dag_id:orchestration.dag_id,run_id:orchestration.run_id,task_id:orchestration.task_id,map_index:-1} : null} /></div></header>
     <div className="csc-grid">
       <Metric label="Affected accounts" value={campaign.affected_accounts} onClick={clearFilters} />
       <Metric label="Affected ARR" value={`$${campaign.affected_arr.toLocaleString()}`} onClick={clearFilters} />
