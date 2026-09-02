@@ -2,10 +2,28 @@ from __future__ import annotations
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+
+# ``airflow.utils.state.TaskInstanceState``, spelled out rather than imported:
+# this client is also used from host shells with no Airflow install, and
+# importing Airflow here re-enters plugin loading and deadlocks on the plugin
+# that imports this module.  A state missing from this list is still counted,
+# it just lands in the "none" bucket, so drift degrades rather than loses work.
+TASK_INSTANCE_STATES: tuple[str, ...] = (
+    "removed", "scheduled", "queued", "running", "success", "restarting",
+    "failed", "up_for_retry", "up_for_reschedule", "upstream_failed",
+    "skipped", "deferred", "awaiting_input",
+)
+
+# Each state costs one request, and a loaded Airflow serialises them, so the
+# live rail asks only for what it renders.  Everything else is reported as
+# "none"; "failed" is here so a failing wave cannot masquerade as one that has
+# not started.
+ORCHESTRATION_STATES: tuple[str, ...] = ("running", "success", "failed", "awaiting_input")
 
 
 class AirflowAPIError(RuntimeError):
@@ -97,13 +115,44 @@ class AirflowClient:
             time.sleep(1)
         raise AirflowAPIError(f"Timed out waiting for {dag_id}/{run_id}/{task_id}")
 
+    def mapped_state_counts(
+        self, dag_id: str, run_id: str, task_id: str, states: tuple[str, ...] = TASK_INSTANCE_STATES
+    ) -> tuple[int, dict[str, int]]:
+        """Count mapped instances per state without downloading any of them.
+
+        ``listMapped`` caps a page at 100 rows, so tallying the 2,417 mapped
+        assessments by walking pages costs tens of round trips on every poll.
+        Airflow reports ``total_entries`` for a filtered query, so one
+        ``limit=1`` request per state is enough, and they are independent
+        enough to issue together.
+        """
+
+        path = f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{task_id}/listMapped"
+
+        def total(state: str | None) -> int:
+            params: dict[str, Any] = {"limit": 1}
+            if state is not None:
+                params["state"] = state
+            page = self._request("GET", path, params=params)
+            if isinstance(page, list):
+                return len(page)
+            return int(page.get("total_entries") or 0)
+
+        queries: tuple[str | None, ...] = (None, *states)
+        with ThreadPoolExecutor(max_workers=len(queries)) as pool:
+            mapped, *totals = list(pool.map(total, queries))
+        counts = {state: value for state, value in zip(states, totals) if value}
+        unaccounted = mapped - sum(counts.values())
+        if unaccounted > 0:
+            # Instances in a state this call did not ask about, plus expanded
+            # instances the scheduler has not reached, which carry no state at
+            # all and match no filter.
+            counts["none"] = unaccounted
+        return mapped, counts
+
     def orchestration_counts(self, dag_id: str, run_id: str, task_id: str) -> dict[str, Any]:
         run = self.dag_run(dag_id, run_id)
-        instances = self.list_mapped(dag_id, run_id, task_id)
-        counts: dict[str, int] = {}
-        for instance in instances:
-            state = str(instance.get("state") or "none")
-            counts[state] = counts.get(state, 0) + 1
+        mapped, counts = self.mapped_state_counts(dag_id, run_id, task_id, ORCHESTRATION_STATES)
         run_state = run.get("state") or run.get("dag_run_state")
         return {
             "dag_id": dag_id,
@@ -111,7 +160,7 @@ class AirflowClient:
             "task_id": task_id,
             "dag_run_state": run_state,
             "run_state": run_state,
-            "mapped": len(instances),
+            "mapped": mapped,
             "states": counts,
             **counts,
         }
