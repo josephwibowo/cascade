@@ -9,8 +9,8 @@ deterministic brief instead. This script fails loudly, before a 36-minute hero
 run is spent finding out.
 
 It follows the path ``@task.llm`` takes: ``PydanticAIHook.get_hook`` on the
-``cascade_llm`` connection, ``create_agent`` with ``MigrationBrief`` as the
-output type and the DAG's system prompt, then ``run_sync``. The prompt is built
+``cascade_llm`` connection, ``create_agent`` with the DAG's output type and
+system prompt, then ``run_sync``. The prompt is built
 from Acme Logistics' real evidence in the mock systems, in the same shape
 ``generate_migration_brief`` sends. One call costs a fraction of a cent on the
 demo model.
@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 from airflow.providers.common.ai.hooks.pydantic_ai import PydanticAIHook
+from pydantic_ai import NativeOutput
 
 # Airflow puts include/ on the path itself inside the container. Append rather
 # than insert, so this fallback can never shadow the plugin's `cascade` package.
@@ -66,7 +67,8 @@ def main() -> int:
         step = f"resolving the model on connection {CONN_ID!r}"
         hook = PydanticAIHook.get_hook(CONN_ID, hook_params={"model_id": None})
         model = hook.get_connection(CONN_ID).extra_dejson.get("model")
-        agent = hook.create_agent(output_type=MigrationBrief, instructions=SYSTEM_PROMPT)
+        # Kept identical to the DAG's output_type; its comment explains why it is native.
+        agent = hook.create_agent(output_type=NativeOutput(MigrationBrief), instructions=SYSTEM_PROMPT)
 
         step = f"calling the provider for {model!r}"
         result = agent.run_sync(build_prompt(evidence))
@@ -78,7 +80,10 @@ def main() -> int:
         print(f"\nFAILED while {step}. Briefs would degrade to deterministic.", file=sys.stderr)
         raise
 
-    usage_report = result.usage() if callable(getattr(result, "usage", None)) else None
+    # pydantic-ai 2.37 exposes usage as a property; the callable check keeps
+    # method-style releases working too.
+    usage = getattr(result, "usage", None)
+    usage_report = usage() if callable(usage) else usage
     print(f"\nOK: {model} returned a valid MigrationBrief for {evidence['account_name']}.")
     print(f"usage: {usage_report}")
     print(brief.model_dump_json(indent=2))
