@@ -13,6 +13,7 @@ try:
 except ImportError:  # Airflow 2 compatibility for local parser tooling.
     from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.trigger_rule import TriggerRule
+from pydantic_ai import NativeOutput
 
 from cascade.aggregate import aggregate_campaign
 from cascade.briefs import MigrationBrief, deterministic_brief
@@ -125,7 +126,10 @@ def product_change_assessment():
     @task.llm(
         task_id="generate_migration_brief",
         llm_conn_id="cascade_llm",
-        output_type=MigrationBrief,
+        # Native structured output (a JSON-schema response format) rather than
+        # pydantic-ai's default output tool: the default forces tool_choice to
+        # "required", which Meta's Muse Spark endpoints reject.
+        output_type=NativeOutput(MigrationBrief),
         system_prompt="You explain migration evidence. You never decide migration status.",
         retries=0,
         multiple_outputs=False,
