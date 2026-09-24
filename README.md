@@ -1,16 +1,16 @@
 # Cascade
 
-Cascade is an Airflow 3.3.1 control-plane demo for the API v1 sunset. It
-combines a real dynamic-mapped assessment DAG, Postgres-backed account state,
-Common AI migration briefs with deterministic degradation, a deferred Airflow
-human-in-the-loop (HITL) review, and a live telemetry verification wave.
+Cascade runs an API deprecation as an Airflow program. When a vendor shuts
+off API v1, Cascade finds every customer still calling it, tracks each one as
+its own mapped task, stops for a person when a customer is blocked, and marks a
+customer migrated only when their telemetry shows it. The dashboard is an
+Airflow 3.3.1 plugin in Airflow's own navigation, and every number on it comes
+from a real DAG run.
 
-It was built for Astronomer's Beyond the DAG hackathon (2026) around one
-claim: an API deprecation is a coordination problem, so the program that runs
-it belongs in the orchestrator. Each affected account becomes a mapped task
-instance, the exception that needs a decision becomes a deferred DAG run
-waiting on a person, and an account counts as migrated only when Airflow
-reaches that verdict from telemetry.
+I built it for Astronomer's Beyond the DAG hackathon (2026), in the Plugin
+Powerhouse category. The idea behind it: shutting down an API is a
+coordination problem across thousands of accounts, and coordinating work is
+what an orchestrator is for.
 
 ## What it does
 
@@ -23,7 +23,8 @@ updates it while the run is still going. From there an operator can:
 - narrow the accounts by status, risk, and preset segments, such as the 13
   accounts blocked on a technical dependency, with every count computed in SQL;
 - open the exception queue, where Acme Logistics ($2,400,000 ARR, blocked on a
-  custom parser) waits on an Airflow HITL decision, and answer it;
+  custom parser) waits on an Airflow human-in-the-loop (HITL) decision, and
+  answer it;
 - advance the mock world to day 7 and watch a second DAG verify only the 84
   accounts whose telemetry changed, which moves Acme to migrated.
 
@@ -50,10 +51,10 @@ Cascade has four parts:
   records, the change definition, and a scenario clock with day-0 and day-7
   snapshots, all from deterministic fixtures.
 
-The design keeps one boundary from `Cascade_Demo_Technical_Design.md`: fake the
-world, never fake the orchestration. The vendor systems are mocks. The
-scheduler, the DAG runs, the 2,417 mapped task instances, the HITL pause, the
-plugin, and, when a model connection is configured, the model call are real.
+The design keeps one boundary: fake the world, never fake the orchestration.
+The vendor systems are mocks. The scheduler, the DAG runs, the 2,417 mapped
+task instances, the HITL pause, the plugin, and, when a model connection is
+configured, the model call are real.
 
 ### Assessment: day 0
 
@@ -158,75 +159,90 @@ there.
 
 Requirements: Docker, the Astro CLI, Node.js, and pnpm.
 
-```bash
-cp .env.example .env
-astro dev start
-pnpm --dir ui install
-pnpm --dir ui build
-printf 'for d in product_change_assessment exception_resolution migration_verification; do airflow dags unpause "$d"; done\n' | astro dev bash -s
-```
+1. Copy the environment file:
 
-The Airflow UI is available at `http://localhost:8080/`; the mock vendor
-systems listen on `http://localhost:8001/`. The Cascade plugin is mounted at
-`/cascade` and its React bundle is built into
-`plugins/cascade/static/cascade.umd.cjs`. The Cascade UI opens from Airflow's
-navigation, at `http://localhost:8080/plugin/cascade`.
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Pick how briefs get written. For model-written briefs, replace `REPLACE` in
+   `AIRFLOW_CONN_CASCADE_LLM` with your OpenRouter key, or point the connection
+   at any other pydantic-ai provider. To run without a model, delete the
+   `AIRFLOW_CONN_CASCADE_LLM` line instead of leaving the placeholder. Briefs
+   are then stored with `brief_source=deterministic`, and migration status is
+   unaffected either way.
+
+3. Start Airflow, build the UI bundle, and unpause the three DAGs:
+
+   ```bash
+   astro dev start
+   pnpm --dir ui install
+   pnpm --dir ui build
+   printf 'for d in product_change_assessment exception_resolution migration_verification; do airflow dags unpause "$d"; done\n' | astro dev bash -s
+   ```
+
+   The build writes the bundle to `plugins/cascade/static/cascade.umd.cjs`.
+
+4. If you configured a model, check it with one real call before a long run:
+
+   ```bash
+   printf 'python scripts/check_llm.py\n' | astro dev bash -s
+   ```
+
+   Airflow's own connection test resolves the model but never calls it, and a
+   failed call during the run quietly falls back to a deterministic brief. The
+   script calls the model through the DAG's code path and prints the
+   provider's error on failure, such as an account setting the provider
+   requires before it will serve the model.
+
+5. Reset to a clean day-0 world and run the assessment:
+
+   ```bash
+   printf 'python scripts/reset_demo.py\n' | astro dev bash -s
+   printf 'python scripts/prepare_hero_run.py\n' | astro dev bash -s
+   ```
+
+   `prepare_hero_run.py` waits for the assessment and asserts the day-0
+   distribution. On a laptop, the assessment took 36 minutes.
+
+6. Open Cascade from Airflow's navigation at
+   `http://localhost:8080/plugin/cascade`. From the scenario controls you can
+   advance the mock world to day 7 and run verification, which maps only the
+   changed accounts and finishes in under a minute.
+
+The Airflow UI is at `http://localhost:8080/`, the Cascade API at `/cascade`,
+and the mock vendor systems at `http://localhost:8001/`.
+
+### If the mock systems do not answer
 
 If `http://localhost:8001/health` does not answer, the `mock-services`
-container from `docker-compose.override.yml` came up attached to no network,
-which also leaves Airflow unable to resolve `mock-services` and silently
-breaks the scenario controls and telemetry. Compose reuses the container, so
+container from `docker-compose.override.yml` came up attached to no network.
+Airflow then cannot resolve `mock-services`, so the scenario controls and
+telemetry break without an obvious error. Compose reuses the container, so
 `astro dev restart` does not repair it. Recreate it:
 
 ```bash
 astro dev kill && astro dev start
 ```
 
-To rehearse the deterministic hero run from a clean day-zero world:
+### Regenerating fixtures
 
-```bash
-printf 'python scripts/reset_demo.py\n' | astro dev bash -s
-printf 'python scripts/prepare_hero_run.py\n' | astro dev bash -s
-```
-
-`prepare_hero_run.py` waits for the assessment and asserts the day-0
-distribution. In the clean-room run on a laptop-sized stack, the assessment
-took 36 minutes and the day-7 verification took under a minute.
-
-The demo UI can then advance the mock world to day 7 and run verification from
-the scenario controls. The verification DAG
-discovers and maps only the changed accounts. Fixture generation is seeded and
-self-validating:
+Fixture generation is seeded and checks its own output:
 
 ```bash
 python scripts/generate_fixtures.py
 ```
 
-Set `AIRFLOW_CONN_CASCADE_LLM` to a supported pydantic-ai connection for model
-generated briefs. When running without a model, remove `AIRFLOW_CONN_CASCADE_LLM`
-from `.env` rather than leaving a `REPLACE` placeholder; briefs are then persisted
-with `brief_source=deterministic` and migration status remains rule-derived.
-
-Airflow's connection test for this connection resolves the model but never
-calls it, and a failed call degrades silently to a deterministic brief. Check
-the connection with one real call through the DAG's own code path before a
-long run. It prints the provider's own error on failure, such as an account
-setting the provider requires before it will serve the model:
-
-```bash
-printf 'python scripts/check_llm.py\n' | astro dev bash -s
-```
-
 ## Project layout
 
 - `dags/`: assessment, exception-resolution, and migration-verification DAGs
-- `docs/plans/`: the implementation plan behind the demo-readiness work
 - `include/cascade/`: rules, fixtures, models, store, API clients, and links
 - `mock_services/`: deterministic vendor-system FastAPI service
 - `plugins/cascade/`: Airflow FastAPI and React plugin entrypoints
 - `scripts/`: schema setup, demo reset, hero-run preparation, fixture
   generation, and the model connection check
-- `ui/`: prefixed, preflight-free React/Tailwind frontend
+- `ui/`: the React frontend, with every style scoped under `#cascade-root` so
+  it cannot restyle Airflow's own UI
 - `tests/`: rules, aggregate, store, and DAG integrity tests
 
 ## License
