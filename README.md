@@ -1,112 +1,49 @@
 # Cascade
 
-Cascade runs an API deprecation as an Airflow program. When a vendor shuts
-off API v1, Cascade finds every customer still calling it, tracks each one as
-its own mapped task, stops for a person when a customer is blocked, and marks a
-customer migrated only when their telemetry shows it. The dashboard is an
-Airflow 3.3.1 plugin in Airflow's own navigation, and every number on it comes
-from a real DAG run.
+**API v1 shuts off on October 31. 2,417 customers, carrying $2.1B in annual
+recurring revenue, are still calling it.** Cascade is an Airflow plugin that
+tracks every one of them to a finished migration, and won't call an account
+migrated until its telemetry agrees.
 
-I built it for Astronomer's Beyond the DAG hackathon (2026), in the Plugin
-Powerhouse category. The idea behind it: shutting down an API is a
-coordination problem across thousands of accounts, and coordinating work is
-what an orchestrator is for.
+▶ [Watch the 3-minute demo](https://youtu.be/zLX3AQpTZR0)
 
-## What it does
+![The Cascade dashboard inside Airflow's navigation, showing 2,417 affected accounts and $2,135,902,569 of affected ARR](docs/dashboard.png)
 
-In the demo, API v1 shuts off on 2026-10-31. The day-0 assessment finds 2,417
-accounts still calling it, carrying $2,135,902,569 of annual recurring revenue
-(ARR), and classifies them as 1,871 not started, 495 in progress, and 51
-blocked. The Cascade UI, served inside Airflow, shows that blast radius and
-updates it while the run is still going. From there an operator can:
+Every number on that screen comes from a real Airflow run. Each customer is a
+mapped task. A blocked $2.4M account pauses a DAG until a person decides what
+to do. No account is marked migrated because someone said so; a rule over its
+usage data decides.
 
-- narrow the accounts by status, risk, and preset segments, such as the 13
-  accounts blocked on a technical dependency, with every count computed in SQL;
-- open the exception queue, where Acme Logistics ($2,400,000 ARR, blocked on a
-  custom parser) waits on an Airflow human-in-the-loop (HITL) decision, and
-  answer it;
-- advance the mock world to day 7 and watch a second DAG verify only the 84
-  accounts whose telemetry changed, which moves Acme to migrated.
+Built for Astronomer's Beyond the DAG hackathon (2026), in the Plugin
+Powerhouse category.
 
-## How it works
+## Why Airflow
 
-One rule holds everywhere: migration status comes only from deterministic
-rules over telemetry, in `include/cascade/rules.py`. A model writes
-explanations and never writes status, so a model outage cannot move a number.
+The hard part of shutting down an API is coordination. Thousands of accounts
+move at different speeds, a few get stuck, and someone has to prove each one
+finished. That means fanning out, waiting, asking a person, and checking again
+later, which is what an orchestrator already does. Cascade gives the team
+running the sunset a view of that program inside Airflow, instead of a
+spreadsheet beside it.
 
-Cascade has four parts:
+## The demo
 
-- Three DAGs: `product_change_assessment` classifies every affected account,
-  `exception_resolution` pauses for a human decision, and
-  `migration_verification` re-checks the accounts whose usage changed.
-- An Airflow 3 plugin: a FastAPI app serves the Cascade API at `/cascade` from
-  Airflow's API server, and a React app adds Cascade to Airflow's navigation at
-  `/plugin/cascade`.
-- The Cascade store: a `cascade` Postgres database on the Airflow Postgres
-  server holds accounts, exceptions, and the timeline. Airflow tasks write every
-  account row. The plugin writes only campaign bookkeeping, such as which
-  verification run to follow, and the resolved state of an exception whose
-  decision it relayed to Airflow.
-- Mock vendor systems: `mock_services/` serves usage telemetry, CRM and contract
-  records, the change definition, and a scenario clock with day-0 and day-7
-  snapshots, all from deterministic fixtures.
+Three steps, the same ones as the video:
 
-The design keeps one boundary: fake the world, never fake the orchestration.
-The vendor systems are mocks. The scheduler, the DAG runs, the 2,417 mapped
-task instances, the HITL pause, the plugin, and, when a model connection is
-configured, the model call are real.
+1. **Day 0, assess.** One DAG run finds the 2,417 accounts still calling v1
+   and maps a task to each. The dashboard fills in while the run is going:
+   1,871 not started, 495 in progress, 51 blocked.
+2. **The exception.** Acme Logistics ($2,400,000 ARR) is blocked on a custom
+   parser. Its DAG run waits on an Airflow human-in-the-loop (HITL) operator.
+   You answer it from Cascade's exception queue, and the plugin sends the
+   answer back to Airflow, which resumes the run.
+3. **Day 7, verify.** Advance the mock world a week. A second DAG re-checks
+   only the 84 accounts whose usage changed, and Acme moves to migrated
+   because its v1 calls have been zero for seven days.
 
-### Assessment: day 0
-
-1. `load_change` reads the change from the mock systems and records the
-   campaign with this run's id.
-2. `discover_affected_accounts` asks the usage system which accounts called v1
-   or v2. The mapped count comes from that response, not from configuration:
-   2,417 on day 0.
-3. `assess_account` runs once per account, at most 16 at a time. Each instance
-   reads usage, CRM, and contract data, applies a first-match-wins status table
-   (migrated, ready to verify, blocked, in progress, not started), derives risk
-   from ARR and status, and writes the account row and a timeline event. A
-   blocked account also gets a pending exception.
-4. `select_high_risk` takes the eight highest-ARR accounts outside the standard
-   segment, and `generate_migration_brief`, a `@task.llm` task, asks the model
-   for a typed `MigrationBrief` under the system prompt "You explain migration
-   evidence. You never decide migration status."
-5. If a model call fails, from a missing connection, a provider error, or
-   output that does not validate, `persist_migration_brief` still runs
-   (`trigger_rule=ALL_DONE`) and stores a deterministic brief with
-   `brief_source=deterministic`. Status and the rollup never read the brief,
-   so nothing else changes.
-6. `aggregate_campaign` rolls the campaign up, and a `TriggerDagRunOperator`
-   starts `exception_resolution` for Acme Logistics.
-
-### Exception: the human decision
-
-1. `exception_resolution` loads Acme's account and builds a review packet with
-   its ARR, v1 and v2 call counts, and blocker.
-2. `HITLOperator` defers the run on `await_decision`, with three options
-   defined in the DAG and a required reason. Cascade's exception queue shows
-   the row as awaiting input and renders the options it reads from Airflow,
-   rather than defining its own.
-3. The operator's answer goes back to Airflow through the plugin.
-   `apply_decision` records it with an `EXTENSION_GRANTED` event, and
-   `write_timeline_event` closes the exception with `EXCEPTION_RESOLVED`.
-4. If the HITL task completes without a chosen option, `apply_decision` raises
-   instead of recording a decision nobody made.
-
-### Verification: day 7
-
-1. The scenario controls advance the mock world to day 7 and trigger
-   `migration_verification`. The plugin records the run id, so the UI's
-   orchestration rail follows the new run.
-2. `find_accounts_with_changed_usage` compares each account's daily v1 and v2
-   calls against the snapshot named in the `cascade_last_snapshot` Airflow
-   Variable. On day 7, 84 accounts changed.
-3. `verify_account` runs once per changed account and re-applies the same
-   status rules. Acme moves to migrated because its v1 calls have been zero
-   for seven days while its v2 calls continue.
-4. If a changed account has no assessed row, `verify_account` fails that
-   instance rather than inventing one.
+Along the way you can filter accounts by status, risk, and preset segments,
+such as the 13 accounts blocked on a technical dependency. Every count is
+computed in SQL.
 
 ## Airflow features used
 
@@ -122,7 +59,7 @@ configured, the model call are real.
 | Airflow Variable | `cascade_last_snapshot` | The telemetry watermark the verification DAG diffs against |
 | Airflow REST API v2 | `include/cascade/airflow_client.py` | Reads run state, mapped task counts, and HITL forms for the UI, and submits HITL responses |
 
-## Challenges
+## What was hard
 
 ### Counting 2,417 mapped task states
 
@@ -232,6 +169,86 @@ Fixture generation is seeded and checks its own output:
 ```bash
 python scripts/generate_fixtures.py
 ```
+
+## How it works in detail
+
+One rule holds everywhere: migration status comes only from deterministic
+rules over telemetry, in `include/cascade/rules.py`. A model writes
+explanations and never writes status, so a model outage cannot move a number.
+
+Cascade has four parts:
+
+- Three DAGs: `product_change_assessment` classifies every affected account,
+  `exception_resolution` pauses for a human decision, and
+  `migration_verification` re-checks the accounts whose usage changed.
+- An Airflow 3 plugin: a FastAPI app serves the Cascade API at `/cascade` from
+  Airflow's API server, and a React app adds Cascade to Airflow's navigation at
+  `/plugin/cascade`.
+- The Cascade store: a `cascade` Postgres database on the Airflow Postgres
+  server holds accounts, exceptions, and the timeline. Airflow tasks write every
+  account row. The plugin writes only campaign bookkeeping, such as which
+  verification run to follow, and the resolved state of an exception whose
+  decision it relayed to Airflow.
+- Mock vendor systems: `mock_services/` serves usage telemetry, CRM and contract
+  records, the change definition, and a scenario clock with day-0 and day-7
+  snapshots, all from deterministic fixtures.
+
+The design keeps one boundary: fake the world, never fake the orchestration.
+The vendor systems are mocks. The scheduler, the DAG runs, the 2,417 mapped
+task instances, the HITL pause, the plugin, and, when a model connection is
+configured, the model call are real.
+
+### Assessment: day 0
+
+1. `load_change` reads the change from the mock systems and records the
+   campaign with this run's id.
+2. `discover_affected_accounts` asks the usage system which accounts called v1
+   or v2. The mapped count comes from that response, not from configuration:
+   2,417 on day 0.
+3. `assess_account` runs once per account, at most 16 at a time. Each instance
+   reads usage, CRM, and contract data, applies a first-match-wins status table
+   (migrated, ready to verify, blocked, in progress, not started), derives risk
+   from ARR and status, and writes the account row and a timeline event. A
+   blocked account also gets a pending exception.
+4. `select_high_risk` takes the eight highest-ARR accounts outside the standard
+   segment, and `generate_migration_brief`, a `@task.llm` task, asks the model
+   for a typed `MigrationBrief` under the system prompt "You explain migration
+   evidence. You never decide migration status."
+5. If a model call fails, from a missing connection, a provider error, or
+   output that does not validate, `persist_migration_brief` still runs
+   (`trigger_rule=ALL_DONE`) and stores a deterministic brief with
+   `brief_source=deterministic`. Status and the rollup never read the brief,
+   so nothing else changes.
+6. `aggregate_campaign` rolls the campaign up, and a `TriggerDagRunOperator`
+   starts `exception_resolution` for Acme Logistics.
+
+### Exception: the human decision
+
+1. `exception_resolution` loads Acme's account and builds a review packet with
+   its ARR, v1 and v2 call counts, and blocker.
+2. `HITLOperator` defers the run on `await_decision`, with three options
+   defined in the DAG and a required reason. Cascade's exception queue shows
+   the row as awaiting input and renders the options it reads from Airflow,
+   rather than defining its own.
+3. The operator's answer goes back to Airflow through the plugin.
+   `apply_decision` records it with an `EXTENSION_GRANTED` event, and
+   `write_timeline_event` closes the exception with `EXCEPTION_RESOLVED`.
+4. If the HITL task completes without a chosen option, `apply_decision` raises
+   instead of recording a decision nobody made.
+
+### Verification: day 7
+
+1. The scenario controls advance the mock world to day 7 and trigger
+   `migration_verification`. The plugin records the run id, so the UI's
+   orchestration rail follows the new run.
+2. `find_accounts_with_changed_usage` compares each account's daily v1 and v2
+   calls against the snapshot named in the `cascade_last_snapshot` Airflow
+   Variable. On day 7, 84 accounts changed.
+3. `verify_account` runs once per changed account and re-applies the same
+   status rules. Acme moves to migrated because its v1 calls have been zero
+   for seven days while its v2 calls continue.
+4. If a changed account has no assessed row, `verify_account` fails that
+   instance rather than inventing one.
 
 ## Project layout
 
